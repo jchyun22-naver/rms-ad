@@ -3,6 +3,7 @@ package com.tna.rmssignage;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -14,18 +15,24 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
+import android.text.InputType;
 import android.text.TextWatcher;
+import android.util.Log;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.PointerIcon;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import org.json.JSONException;
@@ -35,6 +42,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class MainActivity extends Activity {
+    private static final String TAG = "RmsSignage";
     private static final long REFRESH_MS = 5 * 60 * 1000L;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<SignageServer.Media> promotions = new ArrayList<>();
@@ -46,11 +54,13 @@ public final class MainActivity extends Activity {
     private TextureView video;
     private TextView status;
     private MediaPlayer videoPlayer, bgmPlayer;
+    private Runnable videoTimeout;
     private int musicPosition;
     private int position;
     private long playbackToken;
     private boolean active;
     private final Runnable nextImage = this::playNext;
+    private final Runnable hidePromoPointer = () -> setPromoPointerVisible(false);
     private final Runnable refresh = new Runnable() {
         @Override public void run() { if (active) { refreshMedia(); handler.postDelayed(this, REFRESH_MS); } }
     };
@@ -93,7 +103,12 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        showPromoPointer();
+        BoxPointer.center(this);
         active = true;
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                && getIntent().getBooleanExtra("test_landscape", false))
+            config.orientation("landscape");
         applyDisplayMode();
         applyOrientation();
         applyVolume();
@@ -107,15 +122,52 @@ public final class MainActivity extends Activity {
         image.setImageDrawable(null);
         video.setVisibility(View.GONE);
         status.setVisibility(View.VISIBLE);
+        handler.removeCallbacks(refresh);
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                && getIntent().hasExtra("test_extra_video")) {
+            String extra = getIntent().getStringExtra("test_extra_video");
+            String portrait = getIntent().getStringExtra("test_portrait_video");
+            try {
+                SignageServer.Playlist saved = SignageServer.Playlist.fromJson(config.playlist());
+                if (extra == null || portrait == null || !new File(extra).isFile()
+                        || !new File(portrait).isFile() || saved.promotions.size() != 3) {
+                    status.setText("시험 콘텐츠 4개를 찾을 수 없습니다.");
+                    return;
+                }
+                int images = 0, videos = 0;
+                for (SignageServer.Media item : saved.promotions) {
+                    if (SignageServer.Media.IMAGE.equals(item.type)) images++;
+                    if (SignageServer.Media.VIDEO.equals(item.type)) videos++;
+                }
+                if (images != 1 || videos != 2) {
+                    status.setText("시험 콘텐츠 구성이 이미지 1개·영상 2개가 아닙니다.");
+                    return;
+                }
+                List<SignageServer.Media> local = new ArrayList<>();
+                int videoIndex = 0;
+                for (SignageServer.Media item : saved.promotions) {
+                    if (SignageServer.Media.VIDEO.equals(item.type) && ++videoIndex == 2)
+                        local.add(new SignageServer.Media(item.type, item.url, portrait, item.order));
+                    else local.add(item);
+                }
+                local.add(new SignageServer.Media(SignageServer.Media.VIDEO, "usb-local-test", extra, 3));
+                Log.i(TAG, "offline HD playback test: 1 image + 3 videos");
+                usePlaylist(new SignageServer.Playlist(local, saved.bgm));
+            } catch (JSONException e) {
+                status.setText("저장된 시험 콘텐츠를 읽을 수 없습니다.");
+            }
+            return;
+        }
         try {
             SignageServer.Playlist saved = SignageServer.Playlist.fromJson(config.playlist());
             if (!saved.promotions.isEmpty()) usePlaylist(saved);
         } catch (JSONException ignored) { }
-        handler.removeCallbacks(refresh);
         refresh.run();
     }
     @Override protected void onPause() {
         active = false;
+        handler.removeCallbacks(hidePromoPointer);
+        setPromoPointerVisible(true);
         handler.removeCallbacks(refresh);
         handler.removeCallbacks(nextImage);
         stopVideo();
@@ -153,7 +205,9 @@ public final class MainActivity extends Activity {
     private void usePlaylist(SignageServer.Playlist playlist) {
         boolean same = promotions.size() == playlist.promotions.size();
         for (int i = 0; same && i < promotions.size(); i++)
-            same = promotions.get(i).file.equals(playlist.promotions.get(i).file);
+            same = promotions.get(i).file.equals(playlist.promotions.get(i).file)
+                    && promotions.get(i).type.equals(playlist.promotions.get(i).type)
+                    && promotions.get(i).order == playlist.promotions.get(i).order;
         promotions.clear();
         promotions.addAll(playlist.promotions);
         boolean sameMusic = music.size() == playlist.bgm.size();
@@ -184,7 +238,9 @@ public final class MainActivity extends Activity {
         handler.removeCallbacks(nextImage);
         stopVideo();
         long token = ++playbackToken;
-        SignageServer.Media item = promotions.get(position++ % promotions.size());
+        int index = position++ % promotions.size();
+        SignageServer.Media item = promotions.get(index);
+        Log.i(TAG, "play index=" + index + " order=" + item.order + " type=" + item.type);
         if (SignageServer.Media.VIDEO.equals(item.type)) {
             stopBgm();
             image.setVisibility(View.GONE);
@@ -219,7 +275,7 @@ public final class MainActivity extends Activity {
     private void playVideo(String file, long token) {
         video.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
-                if (token != playbackToken || !active) return;
+                if (token != playbackToken || !active || videoPlayer != null) return;
                 try {
                     MediaPlayer player = new MediaPlayer();
                     videoPlayer = player;
@@ -230,17 +286,34 @@ public final class MainActivity extends Activity {
                     player.setAudioStreamType(AudioManager.STREAM_MUSIC);
                     player.setOnPreparedListener(mp -> {
                         if (token != playbackToken || !active) return;
+                        Log.i(TAG, "video prepared " + mp.getVideoWidth() + "x" + mp.getVideoHeight());
                         fitVideo(mp.getVideoWidth(), mp.getVideoHeight());
                         mp.start();
+                        long duration = mp.getDuration();
+                        long timeoutMs = duration > 0 ? duration + 5000L : 30000L;
+                        videoTimeout = () -> {
+                            if (token != playbackToken || !active || videoPlayer != mp) return;
+                            Log.w(TAG, "video timed out after " + timeoutMs + " ms; skipping");
+                            playNext();
+                        };
+                        handler.postDelayed(videoTimeout, timeoutMs);
                     });
                     player.setOnVideoSizeChangedListener((mp, w, h) -> fitVideo(w, h));
-                    player.setOnCompletionListener(mp -> { if (token == playbackToken) playNext(); });
+                    player.setOnCompletionListener(mp -> {
+                        Log.i(TAG, "video completed");
+                        handler.post(() -> { if (token == playbackToken && active) playNext(); });
+                    });
                     player.setOnErrorListener((mp, what, extra) -> {
-                        if (token == playbackToken) handler.postDelayed(MainActivity.this::playNext, 1000);
+                        Log.e(TAG, "video error what=" + what + " extra=" + extra);
+                        handler.postDelayed(() -> { if (token == playbackToken && active) playNext(); }, 1000);
                         return true;
                     });
                     player.prepareAsync();
-                } catch (Exception e) { handler.postDelayed(MainActivity.this::playNext, 1000); }
+                } catch (Exception e) {
+                    Log.e(TAG, "video setup failed", e);
+                    stopVideo();
+                    handler.postDelayed(() -> { if (token == playbackToken && active) playNext(); }, 1000);
+                }
             }
             @Override public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int w, int h) {
                 if (videoPlayer != null) fitVideo(videoPlayer.getVideoWidth(), videoPlayer.getVideoHeight());
@@ -262,6 +335,10 @@ public final class MainActivity extends Activity {
         video.setTransform(transform);
     }
     private void stopVideo() {
+        if (videoTimeout != null) {
+            handler.removeCallbacks(videoTimeout);
+            videoTimeout = null;
+        }
         if (videoPlayer != null) {
             try { videoPlayer.setOnCompletionListener(null); videoPlayer.stop(); } catch (Exception ignored) { }
             videoPlayer.release(); videoPlayer = null;
@@ -319,21 +396,71 @@ public final class MainActivity extends Activity {
         boolean rotate = ("portrait".equals(orientation) && physicalLandscape)
                 || ("landscape".equals(orientation) && !physicalLandscape);
         int stageW = rotate ? h : w, stageH = rotate ? w : h;
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(stageW, stageH, Gravity.CENTER);
-        stage.setLayoutParams(params);
-        stage.setPivotX(stageW / 2f);
-        stage.setPivotY(stageH / 2f);
-        stage.setRotation(rotate ? 90f : 0f);
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) stage.getLayoutParams();
+        if (params.width != stageW || params.height != stageH || params.gravity != Gravity.CENTER)
+            stage.setLayoutParams(new FrameLayout.LayoutParams(stageW, stageH, Gravity.CENTER));
+        if (stage.getPivotX() != stageW / 2f) stage.setPivotX(stageW / 2f);
+        if (stage.getPivotY() != stageH / 2f) stage.setPivotY(stageH / 2f);
+        float rotation = rotate ? 90f : 0f;
+        if (stage.getRotation() != rotation) stage.setRotation(rotation);
+    }
+    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    private void setPromoPointerVisible(boolean visible) {
+        PointerIcon icon = PointerIcon.getSystemIcon(this, visible ? PointerIcon.TYPE_DEFAULT : PointerIcon.TYPE_NULL);
+        root.setPointerIcon(icon);
+        stage.setPointerIcon(icon);
+        image.setPointerIcon(icon);
+        video.setPointerIcon(icon);
+        status.setPointerIcon(icon);
+    }
+    private void showPromoPointer() {
+        setPromoPointerVisible(true);
+        handler.removeCallbacks(hidePromoPointer);
+        handler.postDelayed(hidePromoPointer, 5000);
     }
     private void openAdmin() {
+        handler.removeCallbacks(hidePromoPointer);
+        setPromoPointerVisible(true);
         if (!config.hasPin()) {
             startActivity(new Intent(this, SettingsActivity.class)); return;
         }
         EditText pin = new EditText(this);
-        pin.setInputType(2 | 0x80);
+        pin.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
         pin.setSingleLine(true);
+        pin.setHint("PIN 입력");
+        pin.setShowSoftInputOnFocus(false);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(20), 0, dp(20), dp(8));
+        panel.addView(pin, new LinearLayout.LayoutParams(-1, dp(56)));
+        String[][] keys = {{"1", "2", "3"}, {"4", "5", "6"}, {"7", "8", "9"}, {"", "0", "지우기"}};
+        for (String[] keyRow : keys) {
+            LinearLayout row = new LinearLayout(this);
+            for (String key : keyRow) {
+                View keyView;
+                if (key.isEmpty()) keyView = new View(this);
+                else {
+                    Button button = new Button(this);
+                    button.setText(key);
+                    button.setTextSize(24);
+                    button.setFocusable(false);
+                    button.setOnClickListener(v -> {
+                        String value = pin.getText().toString();
+                        if ("지우기".equals(key)) {
+                            if (!value.isEmpty()) pin.setText(value.substring(0, value.length() - 1));
+                        } else if (value.length() < 12) pin.setText(value + key);
+                        pin.setSelection(pin.length());
+                    });
+                    keyView = button;
+                }
+                LinearLayout.LayoutParams keyParams = new LinearLayout.LayoutParams(0, dp(62), 1);
+                keyParams.setMargins(dp(2), dp(2), dp(2), dp(2));
+                row.addView(keyView, keyParams);
+            }
+            panel.addView(row);
+        }
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("관리자 PIN")
-                .setMessage("취소하려면 리모컨 뒤로가기를 누르세요.").setView(pin)
+                .setMessage("취소하려면 리모컨 뒤로가기를 누르세요.").setView(panel)
                 .setPositiveButton("열기", (clickedDialog, which) -> {
                     if (config.verifyPin(pin.getText().toString())) startActivity(new Intent(this, SettingsActivity.class));
                     else new AlertDialog.Builder(this).setMessage("PIN이 맞지 않습니다.").setPositiveButton("확인", null).show();
@@ -349,6 +476,21 @@ public final class MainActivity extends Activity {
             }
         });
         dialog.show();
+        dialog.setOnDismissListener(closed -> { if (active) showPromoPointer(); });
+        pin.requestFocus();
+        dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+    }
+    @Override public boolean dispatchTouchEvent(MotionEvent event) {
+        if (RemoteMouseDialog.fromBoxRemote(event)) {
+            if (event.getActionMasked() == MotionEvent.ACTION_UP) openAdmin();
+            return true;
+        }
+        return super.dispatchTouchEvent(event);
+    }
+    @Override public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if (RemoteMouseDialog.fromBoxRemote(event)
+                && event.getActionMasked() == MotionEvent.ACTION_HOVER_MOVE) showPromoPointer();
+        return super.dispatchGenericMotionEvent(event);
     }
     @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SETTINGS

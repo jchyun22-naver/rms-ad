@@ -8,10 +8,13 @@ import android.media.AudioManager;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
+import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
@@ -25,10 +28,14 @@ public final class SettingsActivity extends Activity {
     private SignageConfig config;
     private SignageServer server;
     private LinearLayout page;
+    private ScrollView scroll;
     private TextView locationValue, contentValue, monitorValue;
     private int companyId;
     private String companyName = "", buildingCode = "", buildingName = "";
     private boolean waiting;
+    private float lastRemoteY;
+    private boolean hasRemotePosition;
+    private long lastRemoteMoveAt;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -40,8 +47,24 @@ public final class SettingsActivity extends Activity {
     }
     @Override protected void onDestroy() { server.close(); super.onDestroy(); }
 
+    @Override public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if (!RemoteMouseDialog.fromBoxRemote(event)
+                || event.getActionMasked() != MotionEvent.ACTION_HOVER_MOVE)
+            return super.dispatchGenericMotionEvent(event);
+        float dy = event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y);
+        if (dy == 0 && hasRemotePosition) dy = event.getY() - lastRemoteY;
+        lastRemoteY = event.getY();
+        hasRemotePosition = true;
+        long now = event.getEventTime();
+        if (now - lastRemoteMoveAt >= 140 && Math.abs(dy) >= 0.5f) {
+            lastRemoteMoveAt = now;
+            scroll.smoothScrollBy(0, dy > 0 ? dp(80) : -dp(80));
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
+
     private void buildPage() {
-        ScrollView scroll = new ScrollView(this);
+        scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(Color.rgb(242, 246, 251));
         page = new LinearLayout(this);
@@ -51,6 +74,7 @@ public final class SettingsActivity extends Activity {
         setContentView(scroll);
         title("RMS 사이니지 · 관리자");
         note("홍보 화면만 운영합니다. 이미지·동영상·배경음은 기존 RMS 서버에서 받아옵니다.");
+        button("홍보 화면으로 돌아가기", this::returnToPromo);
 
         section("설치 위치");
         locationValue = note(config.locationId() == 0 ? "선택되지 않음" : config.locationName() + "  (ID " + config.locationId() + ")");
@@ -99,10 +123,12 @@ public final class SettingsActivity extends Activity {
         section("관리 및 초기화");
         button("관리자 PIN 변경", this::askNewPin);
         button("기기 리셋 · 사이니지 설정과 저장 콘텐츠 삭제", this::confirmReset);
-        button("홍보 화면으로 돌아가기", () -> {
-            if (!config.hasPin()) message("관리자 PIN을 먼저 설정해 주세요.");
-            else { startActivity(new Intent(this, MainActivity.class)); finish(); }
-        });
+        button("홍보 화면으로 돌아가기", this::returnToPromo);
+    }
+
+    private void returnToPromo() {
+        if (!config.hasPin()) message("관리자 PIN을 먼저 설정해 주세요.");
+        else finish();
     }
 
     private void loadLocations(int level) {
@@ -119,8 +145,7 @@ public final class SettingsActivity extends Activity {
         if (items == null || items.isEmpty()) { message("등록된 항목이 없습니다."); return; }
         String[] names = new String[items.size()];
         for (int i = 0; i < items.size(); i++) names[i] = items.get(i).name;
-        new AlertDialog.Builder(this).setTitle(new String[]{"업체 선택", "건물 선택", "설치 위치 선택"}[level])
-                .setItems(names, (dialog, index) -> {
+        showList(new String[]{"업체 선택", "건물 선택", "설치 위치 선택"}[level], names, index -> {
                     SignageServer.Location item = items.get(index);
                     if (level == 0) { companyId = item.id; companyName = item.name; buildingCode = ""; }
                     else if (level == 1) { buildingCode = item.code; buildingName = item.name; }
@@ -129,7 +154,7 @@ public final class SettingsActivity extends Activity {
                         contentValue.setText("위치를 변경했습니다. 홍보 화면에서 서버 콘텐츠를 받습니다.");
                     }
                     locationValue.setText(level == 2 ? config.locationName() : companyName + (buildingName.isEmpty() ? "" : " / " + buildingName));
-                }).show();
+                });
     }
     private void refreshContent() {
         if (config.locationId() == 0) { message("설치 위치를 먼저 선택해 주세요."); return; }
@@ -199,7 +224,22 @@ public final class SettingsActivity extends Activity {
     }
     private interface Choice { void selected(int index); }
     private void choose(String title, String[] options, Choice selected) {
-        new AlertDialog.Builder(this).setTitle(title).setItems(options, (dialog, index) -> selected.selected(index)).show();
+        showList(title, options, selected);
+    }
+    private void showList(String title, String[] options, Choice selected) {
+        ListView list = new ListView(this);
+        list.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, options));
+        RemoteMouseDialog dialog = new RemoteMouseDialog(this, direction -> {
+            int rowHeight = list.getChildCount() > 0 ? list.getChildAt(0).getHeight() : dp(48);
+            list.scrollListBy(direction * rowHeight);
+        });
+        list.setOnItemClickListener((parent, view, position, id) -> {
+            dialog.dismiss();
+            selected.selected(position);
+        });
+        dialog.setTitle(title);
+        dialog.setView(list);
+        dialog.show();
     }
     private interface ValueChanged { void set(int value); }
     private void slider(String caption, int min, int max, int start, ValueChanged changed, String suffix) {
@@ -230,6 +270,7 @@ public final class SettingsActivity extends Activity {
     }
     private void button(String label, Runnable action) {
         Button button = new Button(this); button.setText(label); button.setTextSize(20);
+        button.setFocusable(true);
         button.setAllCaps(false); button.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
         button.setPadding(dp(18), 0, dp(18), 0);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(58));

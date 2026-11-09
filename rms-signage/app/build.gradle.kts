@@ -10,8 +10,19 @@ android {
         applicationId = "com.tna.rmssignage"
         minSdk = 28
         targetSdk = 28
-        versionCode = 2
-        versionName = "0.2-tv-preview"
+        versionCode = 3
+        versionName = "0.3-tv-preview"
+    }
+    signingConfigs {
+        getByName("debug") {
+            val localDebugKey = file("${rootProject.projectDir}/debug.keystore")
+            if (localDebugKey.isFile) {
+                storeFile = localDebugKey
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
     }
     buildTypes {
         release {
