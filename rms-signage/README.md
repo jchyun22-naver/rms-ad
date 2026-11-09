@@ -13,6 +13,8 @@
 
 ## Windows 노트북에서 빌드
 
+Android `platform-tools`만 먼저 설치하려면 PowerShell에서 `powershell -ExecutionPolicy Bypass -File .\tools\install-platform-tools.ps1`를 실행합니다. 설치 후 새 PowerShell 창에서 `adb version`으로 확인합니다.
+
 1. JDK 17 이상과 Android SDK를 설치합니다. Android SDK Platform 33과 Build Tools가 필요합니다.
 2. 프로젝트 루트에 `local.properties`를 만들고 SDK 경로를 지정합니다. 예: `sdk.dir=C\:\\AndroidSdk`
 3. PowerShell에서 `./gradlew.bat :app:assembleDebug`를 실행합니다.
