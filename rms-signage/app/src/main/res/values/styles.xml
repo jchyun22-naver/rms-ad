@@ -1,0 +1,6 @@
+<resources>
+    <style name="SignageText">
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:textSize">22sp</item>
+    </style>
+</resources>
